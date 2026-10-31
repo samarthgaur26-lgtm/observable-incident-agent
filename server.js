@@ -22,9 +22,8 @@ const LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o-mini';
 const MOCK_LLM = process.env.MOCK_LLM === '1';
 const PROFILE = 'ga5-incident-agent/v2';
 const MAX_BODY = 8 * 1024 * 1024;
-const REQUEST_BUDGET_MS = 16500; // grader allows 18s per request
+const REQUEST_BUDGET_MS = 16500;
 
-/* ------------------------------------------------------------------ utils */
 const runs = new Map();
 const inflight = new Map();
 const now = () => Date.now();
@@ -35,6 +34,7 @@ const hex = (bytes) => {
   return h;
 };
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
 function canon(v) {
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
   if (v && typeof v === 'object') {
@@ -42,6 +42,7 @@ function canon(v) {
   }
   return JSON.stringify(v);
 }
+
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const isStr = (v, max = 4000) => typeof v === 'string' && v.length > 0 && v.length <= max;
@@ -54,6 +55,7 @@ function persist() {
     fs.renameSync(tmp, STORE_FILE);
   } catch (e) { /* best effort; memory is authoritative while running */ }
 }
+
 function load() {
   try {
     const arr = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
@@ -73,25 +75,46 @@ function validateIncident(b) {
   if (!isStr(b.agentName, 200)) return 'agentName invalid';
   if (!isStr(b.publicMarker, 1000)) return 'publicMarker invalid';
   if (b.sensitive !== undefined && !isObj(b.sensitive)) return 'sensitive invalid';
+
   const i = b.incident;
   if (!isObj(i)) return 'incident invalid';
-  for (const k of ['incidentId', 'title', 'service']) if (!isStr(i[k], 5000)) return `incident.${k} invalid`;
+
+  for (const k of ['incidentId', 'title', 'service']) {
+    if (!isStr(i[k], 5000)) return `incident.${k} invalid`;
+  }
+
   if (!isStr(i.transcript, MAX_BODY)) return 'incident.transcript invalid';
-  if (!Array.isArray(i.allowedRootCauses) || !i.allowedRootCauses.length || !i.allowedRootCauses.every((x) => isStr(x))) {
+
+  if (!Array.isArray(i.allowedRootCauses) || !i.allowedRootCauses.length ||
+      !i.allowedRootCauses.every((x) => isStr(x))) {
     return 'incident.allowedRootCauses invalid';
   }
-  if (!Array.isArray(b.toolCatalog) || !b.toolCatalog.length || !b.toolCatalog.every((t) => isObj(t) && isStr(t.name, 300))) {
+
+  if (!Array.isArray(b.toolCatalog) || !b.toolCatalog.length ||
+      !b.toolCatalog.every((t) => isObj(t) && isStr(t.name, 300))) {
     return 'toolCatalog invalid';
   }
+
   const p = b.policy;
   if (!isObj(p)) return 'policy invalid';
-  if (p.maximumDiagnostics !== undefined && !(Number.isInteger(p.maximumDiagnostics) && p.maximumDiagnostics >= 1 && p.maximumDiagnostics <= 20)) {
+
+  if (p.maximumDiagnostics !== undefined &&
+      !(Number.isInteger(p.maximumDiagnostics) &&
+        p.maximumDiagnostics >= 1 && p.maximumDiagnostics <= 20)) {
     return 'policy.maximumDiagnostics invalid';
   }
+
   for (const k of ['effectTools', 'approvalRequiredFor', 'doNotExport']) {
-    if (p[k] !== undefined && !(Array.isArray(p[k]) && p[k].every((x) => typeof x === 'string'))) return `policy.${k} invalid`;
+    if (p[k] !== undefined &&
+        !(Array.isArray(p[k]) && p[k].every((x) => typeof x === 'string'))) {
+      return `policy.${k} invalid`;
+    }
   }
-  if (extractEvidenceIds(i.transcript).length < 2) return 'transcript has no evidence IDs';
+
+  if (extractEvidenceIds(i.transcript).length < 2) {
+    return 'transcript has no evidence IDs';
+  }
+
   return null;
 }
 
@@ -105,25 +128,46 @@ function parseTraceparent(h) {
 /* --------------------------------------------------------------- redaction */
 function makeScrubber(body) {
   const secrets = new Set();
+
   const walk = (v) => {
-    if (typeof v === 'string') { if (v.length >= 4) secrets.add(v); }
-    else if (Array.isArray(v)) v.forEach(walk);
-    else if (isObj(v)) Object.values(v).forEach(walk);
+    if (typeof v === 'string') {
+      if (v.length >= 4) secrets.add(v);
+    } else if (Array.isArray(v)) {
+      v.forEach(walk);
+    } else if (isObj(v)) {
+      Object.values(v).forEach(walk);
+    }
   };
+
   walk(body.sensitive);
-  for (const s of body.policy.doNotExport || []) if (s.length >= 10) secrets.add(s);
+
+  for (const s of body.policy.doNotExport || []) {
+    if (s.length >= 10) secrets.add(s);
+  }
+
   const list = [...secrets].sort((a, b) => b.length - a.length);
-  const str = (s) => { let o = s; for (const x of list) if (o.includes(x)) o = o.split(x).join('[REDACTED]'); return o; };
+
+  const str = (s) => {
+    let o = s;
+    for (const x of list) {
+      if (o.includes(x)) o = o.split(x).join('[REDACTED]');
+    }
+    return o;
+  };
+
   const deep = (v) => {
     if (typeof v === 'string') return str(v);
     if (Array.isArray(v)) return v.map(deep);
-    if (isObj(v)) { const o = {}; for (const k of Object.keys(v)) o[k] = deep(v[k]); return o; }
+    if (isObj(v)) {
+      const o = {};
+      for (const k of Object.keys(v)) o[k] = deep(v[k]);
+      return o;
+    }
     return v;
   };
+
   return { str, deep };
 }
-
-/* ---------------------------------------------------------------- planner */
 function extractEvidenceIds(transcript) {
   const all = [];
   for (const line of String(transcript).split(/\r?\n/)) {
@@ -222,13 +266,17 @@ function mockPlan(body, ids) {
 async function callLLM(messages, timeoutMs, jsonMode) {
   const payload = { model: LLM_MODEL, messages, temperature: 0 };
   if (jsonMode) payload.response_format = { type: 'json_object' };
+  if (process.env.LLM_REASONING_EFFORT) payload.reasoning_effort = process.env.LLM_REASONING_EFFORT;
   const r = await fetch(`${LLM_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${LLM_API_KEY}` },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!r.ok) throw new Error(`llm http ${r.status}`);
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(`llm http ${r.status} ${t.replace(/\s+/g, ' ').slice(0, 300)}`);
+  }
   const j = await r.json();
   const text = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
   if (typeof text !== 'string') throw new Error('llm empty');
@@ -267,7 +315,7 @@ async function planWithModel(body, t0) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const remaining = t0 + REQUEST_BUDGET_MS - now();
     if (remaining < 2500) break;
-    const timeout = attempt === 1 ? Math.min(remaining - 1500, 13000) : remaining - 500;
+    const timeout = attempt === 1 ? Math.min(remaining - 1000, 15000) : remaining - 500;
     try {
       const msgs = lastErr && attempt === 2
         ? [...messages, { role: 'user', content: `Your previous answer was rejected: ${String(lastErr.message).slice(0, 200)}. Return corrected JSON only.` }]
@@ -275,12 +323,10 @@ async function planWithModel(body, t0) {
       const raw = await callLLM(msgs, timeout, attempt === 1);
       const plan = normalizePlan(raw, body, ids, scrub, attempt === 1);
       return { plan, model: LLM_MODEL, chatStart, chatEnd: now() };
-    } catch (e) { lastErr = e; }
+    } catch (e) { lastErr = e; console.error('model error (incident):', String(e.message).slice(0, 300)); }
   }
   throw new Error('model planning failed: ' + (lastErr ? lastErr.message : 'timeout'));
 }
-
-/* ----------------------------------------------------------- state machine */
 function dispatchAction(run, a, attempt, extra) {
   const spanId = hex(8);
   const d = {
@@ -418,8 +464,6 @@ function handleReceipt(run, body) {
   persist();
   return { code: 200, json: response };
 }
-
-/* ------------------------------------------------------------ OTLP builder */
 function buildOtlp(run) {
   const ns = (ms) => String(BigInt(Math.round(ms)) * 1000000n);
   const S = (key, v) => ({ key, value: { stringValue: String(v) } });
@@ -522,20 +566,33 @@ async function createRun(body, headers) {
   persist();
   return run;
 }
-
-/* ------------------------------------------------------------------- HTTP */
 function send(res, code, obj) {
   const data = Buffer.from(JSON.stringify(obj));
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'content-length': data.length, 'cache-control': 'no-store' });
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': data.length,
+    'cache-control': 'no-store'
+  });
   res.end(data);
 }
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    const chunks = []; let size = 0;
-    req.on('data', (c) => { size += c.length; if (size > MAX_BODY) { reject(Object.assign(new Error('too large'), { code: 413 })); req.destroy(); } else chunks.push(c); });
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(Object.assign(new Error('too large'), { code: 413 }));
+        req.destroy();
+      } else chunks.push(c);
+    });
     req.on('end', () => {
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-      catch (e) { reject(Object.assign(new Error('bad json'), { code: 400 })); }
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch (e) {
+        reject(Object.assign(new Error('bad json'), { code: 400 }));
+      }
     });
     req.on('error', reject);
   });
@@ -545,54 +602,149 @@ async function route(req, res) {
   let p = (req.url || '/').split('?')[0].split('#')[0].replace(/\/{2,}/g, '/');
   if (p.length > 1) p = p.replace(/\/+$/, '');
   const m = req.method;
+
   if (p === '/' || p === '/health') return send(res, 200, { ok: true });
+
+  if (p === '/v1/mailroom/actions') {
+    if (m !== 'POST') return send(res, 405, { error: 'method_not_allowed' });
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return send(res, e.code || 400, { error: 'invalid_request' });
+    }
+    const r = await mailroom.handle(body);
+    return send(res, r.code, r.json);
+  }
+
+  if (p === '/debug/llm') {
+    const t = Date.now();
+    const big = (req.url || '').includes('big=1');
+    const filler = big
+      ? Array.from({ length: 900 }, (_, i) => `[ev_${i}] 12:${i % 60} service log line number ${i} nothing unusual happened here at all`).join('\n')
+      : '';
+    const info = {
+      model: LLM_MODEL,
+      baseUrl: LLM_BASE_URL,
+      keySet: !!LLM_API_KEY,
+      mockMode: MOCK_LLM
+    };
+
+    try {
+      const r = await callLLM([
+        {
+          role: 'user',
+          content: (big ? filler + '\n\n' : '') + 'Reply with only this JSON: {"ok":true}'
+        }
+      ], 25000, true);
+
+      return send(res, 200, {
+        ok: true, ...info, big, ms: Date.now() - t, reply: r
+      });
+    } catch (e) {
+      return send(res, 200, {
+        ok: false, ...info, big, ms: Date.now() - t,
+        error: String(e.message).slice(0, 400)
+      });
+    }
+  }
+
+  if (p === '/debug/mailroom') return send(res, 200, mailroom.stats);
 
   if (p === '/v2/incidents') {
     if (m !== 'POST') return send(res, 405, { error: 'method_not_allowed' });
     let body;
-    try { body = await readBody(req); } catch (e) { return send(res, e.code || 400, { error: 'invalid_request' }); }
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return send(res, e.code || 400, { error: 'invalid_request' });
+    }
+
     const err = validateIncident(body);
     if (err) return send(res, 400, { error: 'invalid_request', detail: err });
+
     const hash = sha(canon(body));
     const existing = runs.get(body.runId);
-    if (existing) return existing.requestHash === hash ? send(res, 200, existing.firstResponse) : send(res, 409, { error: 'conflict' });
+    if (existing) {
+      return existing.requestHash === hash
+        ? send(res, 200, existing.firstResponse)
+        : send(res, 409, { error: 'conflict' });
+    }
+
     const pending = inflight.get(body.runId);
     if (pending) {
       if (pending.hash !== hash) return send(res, 409, { error: 'conflict' });
-      try { const r = await pending.promise; return send(res, 200, r.firstResponse); } catch (e) { return send(res, 502, { error: 'model_unavailable' }); }
+      try {
+        const r = await pending.promise;
+        return send(res, 200, r.firstResponse);
+      } catch (e) {
+        return send(res, 502, { error: 'model_unavailable' });
+      }
     }
+
     const promise = createRun(body, req.headers);
     inflight.set(body.runId, { hash, promise });
+
     try {
       const run = await promise;
       return send(res, 200, run.firstResponse);
     } catch (e) {
       return send(res, 502, { error: 'model_unavailable' });
-    } finally { inflight.delete(body.runId); }
+    } finally {
+      inflight.delete(body.runId);
+    }
   }
 
   const mm = /^\/v2\/incidents\/([^/]+)(\/receipts)?$/.exec(p);
+
   if (mm) {
-    let runId; try { runId = decodeURIComponent(mm[1]); } catch (e) { return send(res, 400, { error: 'invalid_request' }); }
+    let runId;
+    try {
+      runId = decodeURIComponent(mm[1]);
+    } catch (e) {
+      return send(res, 400, { error: 'invalid_request' });
+    }
+
     const run = runs.get(runId);
+
     if (mm[2]) {
       if (m !== 'POST') return send(res, 405, { error: 'method_not_allowed' });
       let body;
-      try { body = await readBody(req); } catch (e) { return send(res, e.code || 400, { error: 'invalid_request' }); }
+      try {
+        body = await readBody(req);
+      } catch (e) {
+        return send(res, e.code || 400, { error: 'invalid_request' });
+      }
       if (!run) return send(res, 404, { error: 'not_found' });
       const r = handleReceipt(run, body);
       return send(res, r.code, r.json);
     }
+
     if (m !== 'GET') return send(res, 405, { error: 'method_not_allowed' });
     if (!run) return send(res, 404, { error: 'not_found' });
     return send(res, 200, run.current);
   }
+
   return send(res, 404, { error: 'not_found' });
 }
 
-load();
-const server = http.createServer((req, res) => {
-  route(req, res).catch(() => { if (!res.headersSent) send(res, 500, { error: 'internal_error' }); });
+const mailroom = require('./mailroom')({
+  callLLM,
+  dataDir: DATA_DIR,
+  mock: MOCK_LLM,
+  budgetMs: 50000
 });
+
+load();
+
+const server = http.createServer((req, res) => {
+  route(req, res).catch(() => {
+    if (!res.headersSent) send(res, 500, { error: 'internal_error' });
+  });
+});
+
 server.requestTimeout = 30000;
-server.listen(PORT, '0.0.0.0', () => console.log(`incident agent listening on ${PORT} (mock=${MOCK_LLM})`));
+
+server.listen(PORT, '0.0.0.0', () =>
+  console.log(`incident agent listening on ${PORT} (mock=${MOCK_LLM})`)
+);
